@@ -8,17 +8,27 @@
 import abc
 from typing import List
 
-import fbgemm_gpu.experimental.gen_ai  # noqa: F401
+# import fbgemm_gpu.experimental.gen_ai  # noqa: F401
 
 import torch
 import triton  # @manual=//triton:triton
-from fbgemm_gpu.experimental.gemm.triton_gemm.fp8_gemm import (
-    matmul_fp8_block,
-    matmul_fp8_row,
-    quantize_fp8_block,
-    quantize_fp8_row,
-    scale_fp8_row,
-)
+persistent  = False
+if persistent:
+    from fp8_gemm import (
+        matmul_fp8_block,
+        matmul_fp8_row,
+        quantize_fp8_block,
+        quantize_fp8_row,
+        scale_fp8_row,
+    )
+else:
+    from fp8_gemm_non_persistent import (
+        matmul_fp8_block,
+        matmul_fp8_row,
+        quantize_fp8_block,
+        quantize_fp8_row,
+        scale_fp8_row,
+    )
 
 quantize_op_registry = []
 
@@ -392,7 +402,8 @@ class TritonFP8RowwiseGemm(QuantizeOpBase):
         # Quantize both input tensors.
         xq, x_scale = quantize_fp8_row(x)
         wq, w_scale = quantize_fp8_row(w)
-        bias = torch.randn(w.shape[0], device=x.device, dtype=torch.float32)
+        #bias = torch.randn(w.shape[0], device=x.device, dtype=torch.float32)
+        bias = None
         return xq, wq, x_scale, w_scale, bias
 
     def compute(self, xq, wq, x_scale, w_scale, bias):
@@ -409,7 +420,7 @@ class TritonFP8RowwiseGemm(QuantizeOpBase):
     @property
     def hip(self) -> bool:
         # triton FP8 matmuls do not currently compile on AMD.
-        return False
+        return True
 
     @property
     def cuda(self) -> bool:

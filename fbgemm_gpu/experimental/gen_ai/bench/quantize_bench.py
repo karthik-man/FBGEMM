@@ -15,7 +15,7 @@ import pandas as pd
 import seaborn as sns
 import torch
 
-from .quantize_ops import get_quantize_ops, QuantizeOpBase
+from quantize_ops import get_quantize_ops, QuantizeOpBase
 
 
 def set_amd_env_vars() -> None:
@@ -77,6 +77,7 @@ def benchmark(
         )
         # Also check if the operator is supported.
         if kernel_requested and quantize_op.supported:
+            print(f"Running {quantize_op}")
             # Get the quantized tensors for this operator.
             quantized_vals = quantize_op.quantize(A, B)
             # Compute the output given quantized values.
@@ -248,3 +249,5 @@ def invoke_main() -> None:
 
     args = parser.parse_args()
     main(args)
+
+invoke_main()

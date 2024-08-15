@@ -1,4 +1,4 @@
-M,N,K,,triton-persistent,triton-non-persistent,,ck_rowwise,scaled_mm
+M,N,K,,triton-persistent,triton-non-persistent TFLOPS,,ck_rowwise TFLOPS,scaled_mm TFLOPS
 1,1280,1024,,0.218,0.413,,0.686,0.041
 1,1280,3584,,0.222,0.465,,1.153,1.326
 1,1280,8192,,0.232,0.515,,1.354,2.795

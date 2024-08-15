@@ -104,8 +104,67 @@ def get_configs_io_bound() -> List[Config]:
                         )
     return configs
 
+def need_split_k(SIZE_M, SIZE_N, SIZE_K):
+    return (SIZE_M < 64 or SIZE_N < 64) and SIZE_K > 1024
 
-MATMUL_CONFIGS: List[Config] = [
+tuning_full_space = True
+def prune_configs(configs, named_args, **kwargs):
+    # call only for full tuning space
+    if not tuning_full_space:
+        return configs
+
+    SIZE_M = named_args["A"].shape[0]
+    SIZE_N = named_args["B"].shape[1]
+    SIZE_K = named_args["C"].shape[1]
+
+    pruned_configs = []
+    for config in configs:
+        kw = config.kwargs
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K =\
+            kw["BLOCK_M"], kw["BLOCK_N"], kw["BLOCK_K"]
+        SPLIT_K = kw["SPLIT_K"]
+        if SIZE_M <=32 and BLOCK_SIZE_M != 32:
+            continue
+        if SIZE_N <=32 and BLOCK_SIZE_N != 32:
+            continue
+        # skip large split_k when not necessary
+        if SPLIT_K != 1 and not need_split_k(SIZE_M, SIZE_N, SIZE_K):
+            continue
+        pruned_configs.append(config)
+    print(f"pruned_configs#: {len(pruned_configs)}")
+    return pruned_configs
+
+
+def get_full_tuning_space(use_split_k):
+    configs = []
+    if not tuning_full_space:
+        return configs
+
+    block_mn_range = [32, 64, 128, 256]
+    block_k_range = [32, 64, 128]
+    split_k_range = [1]
+    num_warps_range = [1, 2, 4, 8, 16]
+    group_m_range = [1, 4, 8]
+    # For now we see better perf with num_stages=0 for all gemm configs we care
+    # But keep this explicit so that we do not forget we may need to set it to
+    # other values in the future
+    num_stage_range = [0]
+
+    for block_m in block_mn_range:
+        for block_n in block_mn_range:
+            for block_k in block_k_range:
+                for num_warps in num_warps_range:
+                    for group_m in group_m_range:
+                        for split_k in split_k_range:
+                            for num_stages in num_stage_range:
+                                configs.append(triton.Config({'BLOCK_M': block_m, 'BLOCK_N': block_n, 'BLOCK_K': block_k, 'GROUP_M': group_m, 'SPLIT_K': split_k}, num_stages=num_stages, num_warps=num_warps))
+
+    return configs
+
+MATMUL_CONFIGS: List[Config] = get_full_tuning_space(True)
+
+
+MATMUL_CONFIGS2: List[Config] = [
     # basic configs for compute-bound matmuls
     Config(
         {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32, "SPLIT_K": 1},
@@ -200,14 +259,56 @@ MATMUL_CONFIGS: List[Config] = [
     ),
 ] + get_configs_io_bound()
 
+MATMUL_CONFIGS_16384 = [
+    Config(
+        {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 128, "SPLIT_K" : 1, "GROUP_M": 1},
+        num_stages=0,
+        num_warps=8,
+    ),
+    Config(
+        {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "SPLIT_K" : 1, "GROUP_M": 1},
+        num_stages=0,
+        num_warps=8,
+    ),
+    Config(
+        {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 64, "SPLIT_K" : 1, "GROUP_M": 1},
+        num_stages=0,
+        num_warps=8,
+    ),
+    Config(
+        {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 128, "SPLIT_K" : 1, "GROUP_M": 1},
+        num_stages=0,
+        num_warps=16,
+    ),
+    Config(
+        {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "SPLIT_K" : 1, "GROUP_M": 1},
+        num_stages=0,
+        num_warps=16,
+    ),
+    Config(
+        {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 64, "SPLIT_K" : 1, "GROUP_M": 1},
+        num_stages=0,
+        num_warps=16,
+    ),
+]
+# Benchmarking M=16384, N=16384, K=16384.
+# Running <quantize_ops.TritonFP8RowwiseGemm object at 0x7fb3fd6d4b10>
+# Triton autotuning for function _kernel_quantize_fp8_row finished after 2.64s; best config selected: BLOCK_SIZE: 8192, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None;
+# kwarg {'grid': <function matmul_fp8_row.<locals>.grid at 0x7fb3fd6db240>, 'warmup': False, 'dot_out_dtype': triton.language.float32, 'allow_tf32': True, 'fp8_fast_accum': True, 'AB_DTYPE': False}
+# Triton autotuning for function _kernel_matmul_fp8_row finished after 1246.81s; best config selected: BLOCK_M: 256, BLOCK_N: 256, BLOCK_K: 128, GROUP_M: 1, SPLIT_K: 1, num_warps: 8, num_ctas: 1, num_stages: 0, maxnreg: None;
+# non persistent 6bd63c9e21b84e3ab726f99a31a2733580494aa25e6047ff5fb55292020e717c
+# triton_rowwise sim: 23.000.
+# triton_rowwise ms: 10.578.
+# triton_rowwise TFLOPS: 831.581.
 
 @triton.autotune(
     configs=MATMUL_CONFIGS,
-    key=[
-        "m_key",
-        "n_key",
-        "k_key",
-    ],
+    key=['M', 'N', 'K'],
+    prune_configs_by={
+        'early_config_prune': prune_configs,
+        'perf_model': None,
+        "top_k": None
+    },
 )
 @triton.heuristics(
     {
@@ -972,7 +1073,7 @@ def matmul_fp8_row(
             dot_out_dtype=dot_out_dtype_triton,
             allow_tf32=allow_tf32,
             fp8_fast_accum=fp8_fast_accum,
-            GROUP_M=8,
+            # GROUP_M=8,
             AB_DTYPE=False,
         )
         print_hash("non persistent", k)

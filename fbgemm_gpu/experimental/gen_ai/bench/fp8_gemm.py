@@ -62,6 +62,59 @@ def init_to_zero(name):
     return lambda nargs: nargs[name].zero_()
 
 
+def prune_configs(configs, named_args):
+    # call only for full tuning space
+    if not tuning_full_space:
+        return configs
+
+    SIZE_M = named_args["a_ptr"].shape[0]
+    SIZE_N = named_args["b_ptr"].shape[1]
+    SIZE_K = named_args["a_ptr"].shape[1]
+
+    pruned_configs = []
+    for config in configs:
+        kw = config.kwargs
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K =\
+            kw["BLOCK_SIZE_M"], kw["BLOCK_SIZE_N"], kw["BLOCK_SIZE_K"]
+        SPLIT_K = kw["SPLIT_K"]
+        if SIZE_M <=32 and BLOCK_SIZE_M != 32:
+            continue
+        if SIZE_N <=32 and BLOCK_SIZE_N != 32:
+            continue
+        # skip large split_k when not necessary
+        if SPLIT_K != 1 and not need_split_k(SIZE_M, SIZE_N, SIZE_K):
+            continue
+        pruned_configs.append(config)
+
+    return pruned_configs
+
+tuning_full_space = True
+def get_full_tuning_space(use_split_k):
+    configs = []
+    if not tuning_full_space:
+        return configs
+
+    block_mn_range = [32, 64, 128]
+    block_k_range = [32, 64]
+    split_k_range = [1, 2, 4, 5, 8, 10]
+    num_warps_range = [1, 2, 4, 8]
+    group_m_range = [1, 4, 8]
+    # For now we see better perf with num_stages=0 for all gemm configs we care
+    # But keep this explicit so that we do not forget we may need to set it to
+    # other values in the future
+    num_stage_range = [0]
+
+    for block_m in block_mn_range:
+        for block_n in block_mn_range:
+            for block_k in block_k_range:
+                for num_warps in num_warps_range:
+                    for group_m in group_m_range:
+                        for split_k in split_k_range:
+                            for num_stages in num_stage_range:
+                                configs.append(triton.Config({'BLOCK_SIZE_M': block_m, 'BLOCK_SIZE_N': block_n, 'BLOCK_SIZE_K': block_k, 'GROUP_SIZE_M': group_m, 'SPLIT_K': split_k}, num_stages=num_stages, num_warps=num_warps))
+
+    return configs
+
 def get_configs_io_bound() -> List[Config]:
     """
     Returns a list of configs for matmul that are IO bound.
@@ -103,9 +156,64 @@ def get_configs_io_bound() -> List[Config]:
                             )
                         )
     return configs
+tuning_full_space = True
+def prune_configs(configs, named_args, **kwargs):
+    # call only for full tuning space
+    if not tuning_full_space:
+        return configs
+
+    SIZE_M = named_args["A"].shape[0]
+    SIZE_N = named_args["B"].shape[1]
+    SIZE_K = named_args["C"].shape[1]
+
+    pruned_configs = []
+    for config in configs:
+        kw = config.kwargs
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K =\
+            kw["BLOCK_M"], kw["BLOCK_N"], kw["BLOCK_K"]
+        SPLIT_K = kw["SPLIT_K"]
+        if SIZE_M <=32 and BLOCK_SIZE_M != 32:
+            continue
+        if SIZE_N <=32 and BLOCK_SIZE_N != 32:
+            continue
+        # skip large split_k when not necessary
+        if SPLIT_K != 1 and not need_split_k(SIZE_M, SIZE_N, SIZE_K):
+            continue
+        pruned_configs.append(config)
+    print(f"pruned_configs#: {len(pruned_configs)}")
+    return pruned_configs
 
 
-MATMUL_CONFIGS: List[Config] = [
+def get_full_tuning_space(use_split_k):
+    configs = []
+    if not tuning_full_space:
+        return configs
+
+    block_mn_range = [32, 64, 128, 256]
+    block_k_range = [32, 64, 128]
+    split_k_range = [1]
+    num_warps_range = [1, 2, 4, 8, 16]
+    group_m_range = [1, 4, 8]
+    # For now we see better perf with num_stages=0 for all gemm configs we care
+    # But keep this explicit so that we do not forget we may need to set it to
+    # other values in the future
+    num_stage_range = [0]
+
+    for block_m in block_mn_range:
+        for block_n in block_mn_range:
+            for block_k in block_k_range:
+                for num_warps in num_warps_range:
+                    for group_m in group_m_range:
+                        for split_k in split_k_range:
+                            for num_stages in num_stage_range:
+                                configs.append(triton.Config({'BLOCK_M': block_m, 'BLOCK_N': block_n, 'BLOCK_K': block_k, 'GROUP_M': group_m, 'SPLIT_K': split_k}, num_stages=num_stages, num_warps=num_warps))
+
+    return configs
+
+MATMUL_CONFIGS: List[Config] = get_full_tuning_space(True)
+
+
+MATMUL_CONFIGS2: List[Config] = [
     # basic configs for compute-bound matmuls
     Config(
         {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32, "SPLIT_K": 1},
@@ -208,11 +316,12 @@ MATMUL_CONFIGS: List[Config] = [
 
 @triton.autotune(
     configs=MATMUL_CONFIGS,
-    key=[
-        "m_key",
-        "n_key",
-        "k_key",
-    ],
+    key=['M', 'N', 'K'],
+    prune_configs_by={
+        'early_config_prune': prune_configs,
+        'perf_model': None,
+        "top_k": None
+    },
 )
 @triton.heuristics(
     {
